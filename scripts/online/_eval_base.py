@@ -312,7 +312,7 @@ def _interp_zoh(t_arr, val_arr, t_grid):
 
 
 def _run_episode_traj(agent, env,
-                      init_norm_pat=None, init_noise_std=0.0, rng=None):
+                      init_norm_pat=None, init_noise_std=0.0, rng=None, trajectory=None):
     if init_norm_pat is None:
         init_norm_pat = np.zeros(state_dim, dtype=np.float32)
     if init_noise_std > 0.0:
@@ -324,14 +324,39 @@ def _run_episode_traj(agent, env,
     else:
         state = env.reset(init_state_norm=np.asarray(init_norm_pat, dtype=np.float32))
 
+    patient_env = env.env if isinstance(env, AdaptedEnv) else env
+    if trajectory is not None:
+        trajectory["initial_state_phys"] = (
+            patient_env.phys_state * patient_env.std + patient_env.mean
+        ).copy()
+        for key in ("t_start", "t_end", "state_phys", "policy_action_tanh",
+                    "applied_action_norm", "applied_action_phys", "sofa", "lactate"):
+            trajectory[key] = []
     done = False
     t_list, sofa_list, lac_list, dt_list = [], [], [], []
 
     while not done:
         t0     = float(env.current_t)
         action = agent.select_action(state, deterministic=True)
+        if trajectory is not None:
+            applied = env._action_g2p(action) if isinstance(env, AdaptedEnv) else action
+            u_norm = patient_env.action_min + (applied[:action_dim] + 1.0) / 2.0 * (
+                patient_env.action_max - patient_env.action_min
+            )
+            u_norm = np.clip(u_norm, patient_env.action_min, patient_env.action_max)
         state, _r, done, info = env.step(action)
         t1     = float(env.current_t)
+        if trajectory is not None:
+            trajectory["t_start"].append(t0)
+            trajectory["t_end"].append(t1)
+            trajectory["state_phys"].append((
+                patient_env.phys_state * patient_env.std + patient_env.mean
+            ).copy())
+            trajectory["policy_action_tanh"].append(np.asarray(action).copy())
+            trajectory["applied_action_norm"].append(u_norm.copy())
+            trajectory["applied_action_phys"].append(np.expm1(u_norm * patient_env.action_scale))
+            trajectory["sofa"].append(float(info["sofa"]))
+            trajectory["lactate"].append(float(info["lactate"]))
         t_list.append(t0)
         sofa_list.append(float(info["sofa"]))
         lac_list.append(float(info["lactate"]))
@@ -371,21 +396,48 @@ def _run_episode_traj(agent, env,
     return sofa_interp, lac_interp, metrics
 
 
-def _collect_policy(agent, env, n_eval, init_norm_pat, init_noise_std, rng):
+def _collect_policy(agent, env, n_eval, init_norm_pat, init_noise_std, rng,
+                    trajectory_store=None):
     sofa_trajs, lac_trajs = [], []
     keys = ["mean_sofa", "mean_sofa_all", "final_sofa",
             "mean_lac", "safety_rate", "clearance_6h", "time_above_4", "mean_dt"]
     all_metrics = {k: [] for k in keys}
 
+    episodes = []
     for _ in range(n_eval):
+        trajectory = {} if trajectory_store is not None else None
         sofa_t, lac_t, m = _run_episode_traj(
             agent, env,
             init_norm_pat=init_norm_pat, init_noise_std=init_noise_std, rng=rng,
+            trajectory=trajectory,
         )
+        if trajectory is not None:
+            episodes.append(trajectory)
         sofa_trajs.append(sofa_t); lac_trajs.append(lac_t)
         for k in keys:
             all_metrics[k].append(m[k])
 
+    if trajectory_store is not None:
+        lengths = [len(ep["t_start"]) for ep in episodes]
+        trajectory_store["episode_offsets"] = np.r_[0, np.cumsum(lengths)].astype(np.int64)
+        trajectory_store["initial_state_phys"] = np.stack([
+            ep["initial_state_phys"] for ep in episodes
+        ])
+        for key in ("t_start", "t_end", "state_phys", "policy_action_tanh",
+                    "applied_action_norm", "applied_action_phys", "sofa", "lactate"):
+            trajectory_store["step_" + key] = np.concatenate([
+                np.asarray(ep[key]) for ep in episodes
+            ])
+        trajectory_store["state_names"] = np.array([
+            "spo2", "pao2", "bilirubin", "gcs", "urine", "lactate"
+        ])
+        trajectory_store["action_names"] = np.array(["fio2", "vaso", "fluids"])
+        trajectory_store["schema_version"] = np.array(2)
+        trajectory_store["state_sample_time"] = np.array("step_t_end")
+        trajectory_store["action_interval"] = np.array("[step_t_start, step_t_end)")
+        trajectory_store["metric_sampling"] = np.array(
+            "legacy: post-step SOFA/lactate held from step start on hourly t_grid"
+        )
     sofa_mat = np.stack(sofa_trajs, axis=0)   # (n_eval, T_GRID)
     lac_mat  = np.stack(lac_trajs,  axis=0)   # (n_eval, T_GRID)
     return (sofa_mat.mean(0), sofa_mat.std(0),
@@ -475,10 +527,12 @@ def _worker(pid, algo, pinn_dir, ind_root, pop_root, glb_scales_path,
     results = {}
 
     def _store(key, agent, env):
+        trajectory_store = {}
         sofa_mean, sofa_std, lac_mean, lac_std, m, \
             sofa_mat, lac_mat, per_ep_metrics = _collect_policy(
             agent, env, n_eval,
             init_norm_pat=init_norm_pat, init_noise_std=init_noise_std, rng=rng,
+            trajectory_store=trajectory_store,
         )
         results[key] = {
             "sofa_mean": sofa_mean, "sofa_std": sofa_std,
@@ -486,6 +540,7 @@ def _worker(pid, algo, pinn_dir, ind_root, pop_root, glb_scales_path,
             "sofa_mat":  sofa_mat,   # (n_eval, T_GRID) — raw episode trajectories
             "lac_mat":   lac_mat,
             "per_ep":    per_ep_metrics,
+            "trajectories": trajectory_store,
             **m,
         }
         print(
@@ -585,6 +640,7 @@ def _save_trajectories(pid: int, results: dict, save_dir: str, algo: str) -> Non
             lac_mean  = r["lac_mean"].astype(np.float32),
             lac_std   = r["lac_std"].astype(np.float32),
             **{f"per_ep_{k}": v for k, v in per_ep.items()},
+            **r.get("trajectories", {}),
         )
 
 

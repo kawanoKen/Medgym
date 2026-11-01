@@ -331,8 +331,31 @@ def _load_agg(path: Path) -> dict | None:
     if not path.exists():
         print(f"[WARN] Not found: {path}")
         return None
-    d = np.load(path)
-    return {k: d[k] for k in d.files}
+    with np.load(path, allow_pickle=False) as source:
+        data = {k: source[k] for k in source.files}
+    if "episode_offsets" not in data:
+        return data
+    grid = data["t_grid"]
+    offsets = data["episode_offsets"]
+    states, actions = [], []
+    for episode, (start, end) in enumerate(zip(offsets[:-1], offsets[1:])):
+        # State samples have their actual end times. Hold samples; do not
+        # invent a linear trajectory across a potentially very long interval.
+        times = np.r_[data["step_t_start"][start], data["step_t_end"][start:end]]
+        values = np.vstack([data["initial_state_phys"][episode],
+                            data["step_state_phys"][start:end]])
+        indices = np.clip(np.searchsorted(times, grid, side="right") - 1, 0, len(times) - 1)
+        states.append(values[indices])
+        times = data["step_t_start"][start:end]
+        indices = np.clip(np.searchsorted(times, grid, side="right") - 1, 0, len(times) - 1)
+        actions.append(data["step_applied_action_norm"][start:end][indices])
+    for names, matrices in ((data["state_names"], states), (data["action_names"], actions)):
+        matrix = np.stack(matrices)
+        for index, name in enumerate(names):
+            data[f"{name}_mean"] = matrix[:, :, index].mean(axis=0)
+            data[f"{name}_std"] = matrix[:, :, index].std(axis=0)
+    data["rollout_step_plot"] = True
+    return data
 
 
 def plot_rl_comparison_combined(
@@ -494,9 +517,11 @@ def plot_rl_comparison_combined(
             m = data[tag][f"{key}_mean"]
             s = data[tag][f"{key}_std"]
             means.append(m)
-            ax.plot(t_grid, m, color=color, ls=ls, lw=lw)
+            ax.plot(t_grid, m, color=color, ls=ls, lw=lw,
+                    drawstyle="steps-post" if data[tag].get("rollout_step_plot", False) else "default")
             if np.max(s) > 1e-4 * (np.max(np.abs(m)) + 1e-8):
-                ax.fill_between(t_grid, m - s, m + s, color=color, alpha=ALPHA)
+                ax.fill_between(t_grid, m - s, m + s, color=color, alpha=ALPHA,
+                                step="post" if data[tag].get("rollout_step_plot", False) else None)
         if threshold is not None:
             ax.axhline(y=threshold, color="black", ls="--", lw=1.4, alpha=0.7)
         ax.set_ylabel(ylabel, fontsize=AXIS_LABEL_SIZE, labelpad=labelpad)

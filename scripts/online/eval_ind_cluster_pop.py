@@ -360,6 +360,7 @@ def _worker(
     results = {key: None for key in _policies_for(algo)}
 
     def _store(key: str, agent, env):
+        trajectory_store = {}
         sofa_mean, sofa_std, lac_mean, lac_std, m, sofa_mat, lac_mat, per_ep = base._collect_policy(
             agent,
             env,
@@ -367,6 +368,7 @@ def _worker(
             init_norm_pat=init_norm_pat,
             init_noise_std=init_noise_std,
             rng=rng,
+            trajectory_store=trajectory_store,
         )
         results[key] = {
             "sofa_mean": sofa_mean,
@@ -376,6 +378,7 @@ def _worker(
             "sofa_mat": sofa_mat,
             "lac_mat": lac_mat,
             "per_ep": per_ep,
+            "trajectories": trajectory_store,
             **m,
         }
         print(
@@ -479,6 +482,7 @@ def _save_trajectories(pid: int, results: dict, save_dir: str, algo: str) -> Non
             lac_mean=r["lac_mean"].astype(np.float32),
             lac_std=r["lac_std"].astype(np.float32),
             **{f"per_ep_{k}": v for k, v in per_ep.items()},
+            **r.get("trajectories", {}),
         )
 
 

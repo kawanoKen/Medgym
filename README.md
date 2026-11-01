@@ -100,7 +100,7 @@ tar --zstd -xf checkpoints-remaining15.tar.zst
 
 #### checkpoints-case-pinn (~1.1 MB)
 
-Contains the PINN simulators and pre-computed RL evaluation rollouts for patient 202347 (sepsis case study). Used to reproduce Fig 3, Fig 4, and Fig 7.
+Contains the PINN simulators and policy checkpoints for patient 202347 (sepsis case study). Used to reproduce Fig 3, Fig 4, and Fig 7. Re-evaluate the policies for Figure 4 using the commands below; legacy `aggregated.npz` files are not used.
 
 ```bash
 huggingface-cli download Kenkawano/medgym \
@@ -192,9 +192,9 @@ checkpoints-case-pinn/
     cluster_pooled/cluster_1/          ← cluster-pooled PINN (patient 202347 → cluster 1)
     train70/patient_202347/            ← individual PINN trained on first 70% of steps (Fig 7)
   online/
-    individual/patient_202347/lagrangian_trpo/K20/<fixdt|vardt>/eval/aggregated.npz
-    population/lagrangian_trpo/K20/<fixdt|vardt>/eval/aggregated.npz
-    cluster_pooled/cluster_1/lagrangian_trpo/K20/<fixdt|vardt>/eval/aggregated.npz
+    individual/patient_202347/lagrangian_trpo/K20/<fixdt|vardt>/policy.pt
+    population/lagrangian_trpo/K20/<fixdt|vardt>/policy.pt
+    cluster_pooled/cluster_1/lagrangian_trpo/K20/<fixdt|vardt>/policy.pt
 ```
 
 Sepsis cohort cluster assignment files (`cohort_N_test.csv`, `remaining15_test.csv`) are included in the respective checkpoint archives.
@@ -208,6 +208,48 @@ The main evaluation workflow starts from the released PINN and policy checkpoint
 ---
 
 ## Online Evaluation — Sepsis
+
+### Case study: regenerate Figure 4 from released weights
+
+```bash
+python scripts/online/eval_case_study.py --n-eval 5 --seed 42 --init-noise-std 0
+python scripts/figures/plot_pinn_fit.py --fig 4
+```
+
+For an archive extracted elsewhere, pass `--case-dir /path/to/checkpoints-case-pinn`.
+Use `--save-dir` to change the evaluation destination, then pass
+`--rollout-dir <save-dir>/202347` to the plotting command.
+
+The evaluator writes six `rollout_*.npz` files under
+`results/online/eval/case-study/202347/` and an `_meta.json` with evaluation
+settings, input SHA-256 hashes, and per-policy metrics. Five evaluations here
+mean five episodes of the same released checkpoint, not five training seeds.
+Population and cluster observations and actions are converted between their
+training scales and the patient scales using `AdaptedEnv`.
+
+The rollout schema extends the existing hourly `t_grid`, `sofa_mat`, `lac_mat`,
+and `per_ep_*` metrics with the following arrays (load with `allow_pickle=False`):
+
+| Array | Meaning |
+|---|---|
+| `episode_offsets` | Episode boundaries in the concatenated step arrays |
+| `initial_state_phys` | Each episode's initial physiological state, in physical units |
+| `step_t_start`, `step_t_end` | Actual interval boundaries, in hours |
+| `step_state_phys` | Physiological state sampled at `step_t_end` |
+| `step_policy_action_tanh` | Original policy output, including the timing component when present |
+| `step_applied_action_norm` | Unrounded treatment action in the patient PINN's normalized coordinates |
+| `step_applied_action_phys` | Applied treatment in physical units, after patient-bound clipping |
+| `step_sofa`, `step_lactate` | Per-step endpoint evaluation values |
+
+Figure 4 uses these files directly. Recorded states and actions are held on the
+hourly plotting grid; it does not linearly interpolate a long intervention
+interval or claim to evaluate the continuous trajectory between endpoint samples.
+The existing Table evaluation convention is preserved: hourly SOFA/lactate metric
+arrays hold post-step values from interval start. This convention is explicitly
+recorded in each file and is distinct from the actual endpoint timestamps.
+Do not interpret a plotted curve's sample mean as a replacement for `per_ep_*`
+metrics. Updated curves use patient-scale action conversion and are not expected
+to match the legacy, unconverted population curves.
 
 ### 1. Ind / Cluster-pooled / Population comparison (checkpoints-cohort)
 

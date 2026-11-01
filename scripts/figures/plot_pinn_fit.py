@@ -16,6 +16,7 @@ Usage
   cd medrl-tacos
   python scripts/figures/plot_pinn_fit.py            # all three figures
   python scripts/figures/plot_pinn_fit.py --fig 3    # Fig 3: PINN fit
+  python scripts/online/eval_case_study.py         # evaluate six released policies
   python scripts/figures/plot_pinn_fit.py --fig 4    # Fig 4: RL comparison
   python scripts/figures/plot_pinn_fit.py --fig 7    # Fig 7: Ind PINN (train70)
 
@@ -93,19 +94,18 @@ def plot_fig3() -> None:
 
 
 # ── Fig 4: RL comparison (Pop + Clu + Ind, K=20) ─────────────────────────────
-def plot_fig4() -> None:
+def plot_fig4(rollout_dir: Path | None = None) -> None:
+    rollout_dir = rollout_dir or PROJECT_ROOT / "results/online/eval/case-study" / str(ICU_ID)
     npz_paths = {
-        "ind_vardt": _IND_RL / "vardt" / "eval" / "aggregated.npz",
-        "ind_fixdt": _IND_RL / "fixdt" / "eval" / "aggregated.npz",
-        "pop_vardt": _POP_RL / "vardt" / "eval" / "aggregated.npz",
-        "pop_fixdt": _POP_RL / "fixdt" / "eval" / "aggregated.npz",
-        "clu_vardt": _CLU_RL / "vardt" / "eval" / "aggregated.npz",
-        "clu_fixdt": _CLU_RL / "fixdt" / "eval" / "aggregated.npz",
+        f"{scope}_{tag}": rollout_dir / f"rollout_{FILE_PREFIX}_{policy_scope}_{tag}.npz"
+        for scope, policy_scope in (("ind", "ind"), ("clu", "cluster_pooled"), ("pop", "pop"))
+        for tag in ("fixdt", "vardt")
     }
     missing = [p for p in npz_paths.values() if not p.exists()]
     if missing:
         raise FileNotFoundError(
-            "Missing aggregated.npz files:\n" + "\n".join(f"  {p}" for p in missing)
+            "Missing rollout files. Run python scripts/online/eval_case_study.py first:\n"
+            + "\n".join(f"  {p}" for p in missing)
         )
 
     save_dir = PROJECT_ROOT / "out" / "fig4_pid202347"
@@ -182,12 +182,14 @@ def main() -> None:
         "--fig", choices=["3", "4", "7", "all"], default="all",
         help="Which figure to plot (default: all)",
     )
+    parser.add_argument("--rollout-dir", type=Path, default=None,
+                        help="Directory containing the six Figure 4 rollout_*.npz files")
     args = parser.parse_args()
 
     if args.fig in ("3", "all"):
         plot_fig3()
     if args.fig in ("4", "all"):
-        plot_fig4()
+        plot_fig4(args.rollout_dir)
     if args.fig in ("7", "all"):
         plot_fig7()
 
